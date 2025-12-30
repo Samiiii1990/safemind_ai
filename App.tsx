@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import SQLite from 'react-native-sqlite-storage';
 import { analyzeRisk } from './src/AnalyzerAI';
+import { isNoiseMessage } from './src/utils/filters';
 
 interface NotificationData {
   id: number;
@@ -52,7 +53,10 @@ const App = () => {
         const appNombre = event.app || "App";
         
         console.log(`📩 Recibido de: ${remitente} | App: ${appNombre}`);
-        
+        if (isNoiseMessage(event.message)) {
+        console.log("TS: Ruido de sistema ignorado:", event.message);
+        return;
+      }
         await processAndSaveNotification({
           sender: `${remitente} (${appNombre})`,
           message: event.message
@@ -102,26 +106,36 @@ const App = () => {
     });
   };
 
-  const processAndSaveNotification = async (notif: {sender: string, message: string}) => {
-    try {
-      const analysis = await analyzeRisk(notif.message);
-      const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const processAndSaveNotification = async (notif: {sender: string, message: string}) => {
+  try {
+    const analysis = await analyzeRisk(notif.message);
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+    if (analysis.riskLevel >= 5) {
+      console.log(`⚠️ Riesgo detectado (${analysis.riskLevel}). Guardando evidencia...`);
+      
       db.transaction(tx => {
         tx.executeSql(
           'INSERT INTO messages (sender, message, timestamp, isAnomalous, riskLevel, engine, groomingStage) VALUES (?, ?, ?, ?, ?, ?, ?)',
           [notif.sender, notif.message, timestamp, analysis.isAnomalous ? 1 : 0, analysis.riskLevel, analysis.engine, analysis.groomingStage],
           () => {
-            console.log('✅ IA Proceso completado');
+            console.log('✅ Evidencia persistida en SQLite');
             loadNotifications();
+            
+            // Aquí irá la llamada a Firebase en el siguiente paso:
+            // syncWithFirebase(notif, analysis); 
           }
         );
       });
-    } catch (error) {
-      console.error('Error procesando notificación:', error);
+    } else {
+      // Si el riesgo es bajo, no se guarda nada en SQLite.
+      console.log(`✅ Mensaje seguro (Nivel: ${analysis.riskLevel}). Ignorando persistencia.`);
     }
-  };
 
+  } catch (error) {
+    console.error('Error procesando notificación:', error);
+  }
+};
   const renderItem = ({ item }: { item: NotificationData }) => {
     // Lógica de colores por niveles
     const isHighRisk = item.riskLevel >= 7;

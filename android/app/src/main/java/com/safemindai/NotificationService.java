@@ -24,8 +24,8 @@ public class NotificationService extends NotificationListenerService {
     public void onNotificationPosted(StatusBarNotification sbn) {
         String packageName = sbn.getPackageName();
 
-        // Filtro de Apps
-        boolean esAppValida =
+        // 1. FILTRO DE APLICACIONES CRÍTICAS (Whitelist)
+        boolean isValidApp =
                 packageName.equals("com.whatsapp") ||
                         packageName.equals("com.whatsapp.w4b") ||
                         packageName.equals("org.telegram.messenger") ||
@@ -35,38 +35,54 @@ public class NotificationService extends NotificationListenerService {
                         packageName.equals("com.roblox.client") ||
                         packageName.equals("com.zhiliaoapp.musically");
 
-        if (!esAppValida) return;
+        if (!isValidApp) return;
 
         Bundle extras = sbn.getNotification().extras;
         CharSequence text = extras.getCharSequence("android.text");
         String title = extras.getString("android.title");
 
         if (text != null) {
-            String mensajeStr = text.toString();
+            String messageStr = text.toString();
 
-            // GENERAMOS UN ID ÚNICO REAL: App + Remitente + Mensaje
-            String uniqueId = packageName + "|" + title + "|" + mensajeStr;
+            // 2. FILTRO DE RUIDO Y MENSAJES DE ESTADO (System/Service Noise)
+            // Agrupamos todos los casos detectados en las pruebas de campo
+            boolean isNoise =
+                    messageStr.matches(".*\\d+ mensajes nuevos.*") || // WhatsApp: "5 mensajes nuevos"
+                            messageStr.contains("Preparando copia de seguridad") ||
+                            messageStr.startsWith("Subiendo:") ||
+                            messageStr.contains("Copia de seguridad en curso") ||
+                            messageStr.contains("Buscando nuevos mensajes") ||
+                            messageStr.contains("Checking for messages") ||
+                            messageStr.equals("Cifrado de extremo a extremo");
 
-            // SI YA LO PROCESAMOS, SALIMOS
+            if (isNoise) return;
+
+            // 3. CONTROL DE DUPLICIDAD (HashSet Idempotency)
+            // Generamos firma única: App + Remitente + Contenido
+            String uniqueId = packageName + "|" + (title != null ? title : "") + "|" + messageStr;
+
             if (processedMessages.contains(uniqueId)) {
                 return;
             }
 
-            // AGREGAMOS AL HISTORIAL Y CONTROLAMOS EL TAMAÑO
-            if (processedMessages.size() > MAX_HISTORY) {
-                processedMessages.clear(); // Limpieza simple para la tesis
+            // Gestión de memoria del historial de firmas
+            if (processedMessages.size() >= MAX_HISTORY) {
+                processedMessages.clear();
             }
             processedMessages.add(uniqueId);
 
-            // EXTRACCIÓN DE TIEMPO
+            // 4. PROCESAMIENTO DE TIEMPO Y ENVÍO
             long timestamp = sbn.getPostTime();
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
-            String fechaHoraFormateada = sdf.format(new Date(timestamp));
+            String dateFormmatted = sdf.format(new Date(timestamp));
 
-            // Filtro de mensajes de sistema internos de las apps
-            if (!mensajeStr.contains("Buscando nuevos mensajes") && !mensajeStr.contains("Checking for messages")) {
-                sendEventToJS(title != null ? title : "Sin título", mensajeStr, packageName, fechaHoraFormateada);
-            }
+            // Enviar al Bridge de React Native para el análisis de IA
+            sendEventToJS(
+                    title != null ? title : "Unknown Sender",
+                    messageStr,
+                    packageName,
+                    dateFormmatted
+            );
         }
     }
 
