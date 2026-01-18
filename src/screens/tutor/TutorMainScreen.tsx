@@ -1,0 +1,432 @@
+import React, {useEffect, useState} from 'react';
+import {
+  Modal,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  View,
+  FlatList,
+  TouchableOpacity,
+  Alert,
+} from 'react-native';
+import QRCode from 'react-native-qrcode-svg';
+import SQLite from 'react-native-sqlite-storage';
+import auth from '@react-native-firebase/auth';
+import firestore from '@react-native-firebase/firestore';
+import messaging from '@react-native-firebase/messaging';
+
+interface NotificationData {
+  id: number;
+  sender: string;
+  message: string;
+  timestamp: string;
+  isAnomalous: number;
+  riskLevel: number;
+  engine: string;
+  groomingStage: string;
+  timestampRaw?: number;
+}
+
+const db = SQLite.openDatabase(
+  {name: 'SafeMind.db', location: 'default'},
+  () => {},
+  error => console.log('Error opening DB: ', error),
+);
+
+const TutorMainScreen = () => {
+  const [notifications, setNotifications] = useState<NotificationData[]>([]);
+const [modalVisible, setModalVisible] = useState(false);
+const [linkedChildren, setLinkedChildren] = useState<any[]>([]);
+const user = auth().currentUser;
+  useEffect(() => {
+    loadNotifications();
+  }, []);
+
+  const loadNotifications = () => {
+    db.transaction(tx => {
+      tx.executeSql(
+        'SELECT * FROM messages ORDER BY id DESC',
+        [],
+        (_, results) => {
+          let temp = [];
+          for (let i = 0; i < results.rows.length; ++i) {
+            temp.push(results.rows.item(i));
+          }
+          setNotifications(temp);
+        },
+      );
+    });
+  };
+  useEffect(() => {
+    const user = auth().currentUser;
+    if (!user) return;
+
+    // Escuchamos en tiempo real las alertas destinadas a este Tutor
+    const unsubscribe = firestore()
+      .collection('alerts')
+      .where('tutorId', '==', user.uid) // Solo las mías
+      .onSnapshot(
+        querySnapshot => {
+          const tempAlerts: NotificationData[] = [];
+          querySnapshot.forEach(doc => {
+            const data = doc.data();
+            tempAlerts.push({
+              id: doc.id as any,
+              sender: data.sender || 'Sistema',
+              message: data.message,
+              timestamp:
+                data.timestamp
+                  ?.toDate()
+                  .toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }) || 'Reciente',
+              isAnomalous: data.riskLevel >= 7 ? 1 : 0,
+              riskLevel: data.riskLevel,
+              engine: 'AI-Cloud',
+              groomingStage: data.groomingStage || 'Analizando',
+              timestampRaw: data.timestamp?.toMillis() || Date.now(),
+            });
+          });
+          // Ordenar en el cliente por timestamp descendente
+          tempAlerts.sort((a, b) => (b.timestampRaw || 0) - (a.timestampRaw || 0));
+          setNotifications(tempAlerts);
+        },
+        error => {
+          console.error('Error al leer alertas de Firestore: ', error);
+        },
+      );
+
+    return () => unsubscribe(); // Limpiamos la escucha al salir
+  }, []);
+
+  useEffect(() => {
+  const saveFcmToken = async () => {
+    // 1. Pedir permiso (vital en Android 13+ y iOS)
+    const authStatus = await messaging().requestPermission();
+    const enabled = authStatus === messaging.AuthorizationStatus.AUTHORIZED;
+
+    if (enabled) {
+      // 2. Obtener el Token de este dispositivo
+      const token = await messaging().getToken();
+      const uid = auth().currentUser?.uid;
+
+      // 3. Guardarlo en Firestore para que el Backend sepa a dónde enviar la notificación
+      if (uid) {
+        await firestore().collection('users').doc(uid).set({
+          fcmToken: token,
+          lastActive: firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      }
+    }
+  };
+
+  saveFcmToken();
+}, []);
+useEffect(() => {
+  const user = auth().currentUser;
+  if (!user) return;
+
+  const unsubscribe = firestore()
+    .collection('users')
+    .where('role', '==', 'child')
+    .where('tutorId', '==', user.uid)
+    .onSnapshot(querySnapshot => {
+      const children: React.SetStateAction<any[]> = [];
+      querySnapshot.forEach(doc => {
+        children.push({ id: doc.id, ...doc.data() });
+      });
+      setLinkedChildren(children);
+    });
+
+  return () => unsubscribe();
+}, []);
+  const renderItem = ({item}: {item: NotificationData}) => {
+    // Definimos los rangos de riesgo
+    const isHighRisk = item.riskLevel >= 7; // 7, 8, 9, 10 -> ROJO
+    const isMediumRisk = item.riskLevel >= 5 && item.riskLevel < 7; // 5, 6 -> AMARILLO
+
+    // Formatear el nombre de la app (extraer solo el nombre)
+    const formatAppName = (sender: string) => {
+      if (sender.includes('com.whatsapp')) return 'WhatsApp';
+      if (sender.includes('com.instagram')) return 'Instagram';
+      if (sender.includes('com.facebook')) return 'Facebook';
+      if (sender.includes('com.snapchat')) return 'Snapchat';
+      if (sender.includes('com.tiktok')) return 'TikTok';
+      if (sender.includes('Musically')) return 'TikTok';
+      if (sender.includes('com.telegram')) return 'Telegram';
+      if (sender.includes('Client)')) return 'Roblox';
+      if (sender.includes('com.roblox')) return 'Roblox';
+
+      // Para otros casos, extraer después del último punto
+      const parts = sender.split('.');
+      return (
+        parts[parts.length - 1].charAt(0).toUpperCase() +
+        parts[parts.length - 1].slice(1)
+      );
+    };
+
+    return (
+      <View
+        style={[
+          styles.card,
+          isHighRisk && styles.highRiskCard,
+          isMediumRisk && styles.mediumRiskCard,
+        ]}>
+        <View style={styles.cardHeader}>
+          <Text
+            style={[
+              styles.sender,
+              isHighRisk && styles.highRiskText,
+              isMediumRisk && styles.mediumRiskText,
+            ]}>
+            {isHighRisk ? '🚨 ' : '⚠️ '}
+            {formatAppName(item.sender)}
+          </Text>
+          <Text style={styles.time}>{item.timestamp}</Text>
+        </View>
+
+        <Text style={[styles.message, isHighRisk && styles.highRiskText]}>
+          {item.message}
+        </Text>
+
+        <View
+          style={[
+            styles.riskBadge,
+            isMediumRisk && {backgroundColor: '#f1c40f'},
+          ]}>
+          <Text style={styles.riskBadgeText}>
+            NIVEL {item.riskLevel} | {item.groomingStage.toUpperCase()}
+          </Text>
+        </View>
+      </View>
+    );
+  };
+
+  const handleLogout = () => {
+    auth()
+      .signOut()
+      .then(() => Alert.alert('Sesión cerrada'));
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+<View style={styles.header}>
+      <View>
+        <Text style={styles.title}>SafeMind AI</Text>
+        <Text style={styles.subtitle}>● Conectado como Tutor</Text>
+      </View>
+      
+      {/* NUEVO: Contenedor de botones a la derecha */}
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <TouchableOpacity 
+          onPress={() => setModalVisible(true)} 
+          style={styles.qrHeaderButton}
+        >
+          <Text style={{ fontSize: 20 }}>📱</Text>
+        </TouchableOpacity>
+        
+        <TouchableOpacity onPress={handleLogout} style={styles.logoutButton}>
+          <Text style={styles.logoutText}>Salir</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+
+    {/* --- MODAL DEL QR --- */}
+    <Modal
+      animationType="slide"
+      transparent={true}
+      visible={modalVisible}
+      onRequestClose={() => setModalVisible(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <Text style={styles.modalTitle}>Vincular Hijo</Text>
+          <Text style={styles.modalSub}>Escaneá este código desde el celular del menor</Text>
+          
+          <View style={styles.qrWrapper}>
+            {user && (
+              <QRCode value={user.uid} size={200} />
+            )}
+          </View>
+          
+          <Text style={styles.uidText}>ID: {user?.uid.substring(0, 10)}...</Text>
+
+          <TouchableOpacity 
+            style={styles.closeButton} 
+            onPress={() => setModalVisible(false)}
+          >
+            <Text style={styles.closeButtonText}>Cerrar</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+<View style={styles.dashboardContainer}>
+  <View style={styles.statCard}>
+    <Text style={styles.statNumber}>{linkedChildren.length}</Text>
+    <Text style={styles.statLabel}>Hijos Protegidos</Text>
+  </View>
+  
+  <View style={styles.childrenList}>
+    <Text style={styles.listTitle}>Dispositivos Activos:</Text>
+    {linkedChildren.length === 0 ? (
+      <Text style={styles.noChildrenText}>Esperando vinculación...</Text>
+    ) : (
+      linkedChildren.map(child => (
+        <View key={child.id} style={styles.childBadge}>
+          <Text style={styles.childBadgeText}>📱 {child.email?.split('@')[0]}</Text>
+        </View>
+      ))
+    )}
+  </View>
+</View>
+      <FlatList
+        data={notifications}
+        keyExtractor={item => item.id.toString()}
+        renderItem={renderItem}
+        ListEmptyComponent={
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyText}>Sin alertas críticas.</Text>
+          </View>
+        }
+      />
+    </SafeAreaView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {flex: 1, backgroundColor: '#f8f9fa'},
+  header: {
+    padding: 20,
+    backgroundColor: '#fff',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    elevation: 4,
+  },
+  title: {fontSize: 22, fontWeight: 'bold', color: '#1a1a1a'},
+  subtitle: {fontSize: 12, color: '#2ecc71', fontWeight: 'bold', marginTop: 2},
+  card: {
+    backgroundColor: '#fff',
+    padding: 18,
+    marginHorizontal: 16,
+    marginVertical: 8,
+    borderRadius: 12,
+    elevation: 3,
+  },
+  highRiskCard: {
+    backgroundColor: '#fff5f5',
+    borderLeftWidth: 6,
+    borderLeftColor: '#e74c3c',
+  },
+  mediumRiskCard: {
+    backgroundColor: '#fffdf0',
+    borderLeftWidth: 6,
+    borderLeftColor: '#f1c40f',
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  sender: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#333',
+    flex: 1,
+  },
+  highRiskText: {color: '#c0392b'},
+  mediumRiskText: {color: '#967117'},
+  time: {
+    fontSize: 11,
+    color: '#999',
+    marginLeft: 8,
+  },
+  message: {
+    fontSize: 15,
+    color: '#2d3436',
+    lineHeight: 22,
+    marginBottom: 8,
+  },
+  riskBadge: {
+    backgroundColor: '#e74c3c',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginTop: 8,
+    alignSelf: 'flex-start',
+  },
+  riskBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  emptyContainer: {alignItems: 'center', marginTop: 100},
+  emptyText: {fontSize: 16, color: '#bdc3c7', fontWeight: 'bold'},
+  logoutButton: {padding: 8, backgroundColor: '#fee', borderRadius: 5},
+  logoutText: {color: '#e74c3c', fontSize: 12, fontWeight: 'bold'},
+qrHeaderButton: {
+    padding: 8,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    marginRight: 10,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '85%',
+    backgroundColor: 'white',
+    borderRadius: 20,
+    padding: 25,
+    alignItems: 'center',
+    elevation: 10,
+  },
+  modalTitle: { fontSize: 22, fontWeight: 'bold', color: '#2c3e50' },
+  modalSub: { fontSize: 14, color: '#7f8c8d', textAlign: 'center', marginVertical: 10 },
+  qrWrapper: { padding: 15, backgroundColor: 'white', marginVertical: 20 },
+  uidText: { fontSize: 10, color: '#bdc3c7', marginBottom: 20 },
+  closeButton: {
+    backgroundColor: '#3498db',
+    paddingHorizontal: 30,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  closeButtonText: { color: 'white', fontWeight: 'bold' },
+  dashboardContainer: {
+    padding: 15,
+    backgroundColor: '#fff',
+    margin: 16,
+    borderRadius: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    elevation: 2,
+  },
+  statCard: {
+    alignItems: 'center',
+    paddingRight: 15,
+    borderRightWidth: 1,
+    borderRightColor: '#eee',
+  },
+  statNumber: { fontSize: 28, fontWeight: 'bold', color: '#3498db' },
+  statLabel: { fontSize: 10, color: '#7f8c8d', fontWeight: 'bold' },
+  childrenList: { flex: 1, paddingLeft: 15 },
+  listTitle: { fontSize: 12, fontWeight: 'bold', color: '#2c3e50', marginBottom: 5 },
+  childBadge: {
+    backgroundColor: '#ebf5ff',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 10,
+    alignSelf: 'flex-start',
+    marginBottom: 4,
+  },
+  childBadgeText: { fontSize: 11, color: '#3498db', fontWeight: 'bold' },
+  noChildrenText: { fontSize: 11, color: '#bdc3c7', fontStyle: 'italic' },
+});
+
+export default TutorMainScreen;
