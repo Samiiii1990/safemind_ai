@@ -1,25 +1,35 @@
 import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert } from 'react-native';
 import auth from '@react-native-firebase/auth';
-
+import firestore from '@react-native-firebase/firestore';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 
 GoogleSignin.configure({
-  webClientId: '542816805960-m6dqmqk1d1d9p8fa6fdufjck1i6tptel.apps.googleusercontent.com', // Lo encuentras en la consola de Firebase > Google Provider
+  webClientId: '542816805960-m6dqmqk1d1d9p8fa6fdufjck1i6tptel.apps.googleusercontent.com',
 });
 
 const LoginScreen = ({ onLoginSuccess }: { onLoginSuccess: () => void }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
+  const [selectedRole, setSelectedRole] = useState<'tutor' | 'child'>('tutor');
 
   const handleAuth = async () => {
     if (!email || !password) return Alert.alert("Error", "Completa todos los campos");
 
     try {
       if (isRegistering) {
-        await auth().createUserWithEmailAndPassword(email, password);
-        Alert.alert("Éxito", "Cuenta de tutor creada");
+        // Crear cuenta
+        const userCredential = await auth().createUserWithEmailAndPassword(email, password);
+        
+        // Guardar rol en Firestore
+        await firestore().collection('users').doc(userCredential.user.uid).set({
+          email: email,
+          role: selectedRole,
+          createdAt: firestore.FieldValue.serverTimestamp(),
+        });
+        
+        Alert.alert("Éxito", `Cuenta de ${selectedRole === 'tutor' ? 'Tutor' : 'Hijo'} creada`);
       } else {
         await auth().signInWithEmailAndPassword(email, password);
       }
@@ -28,45 +38,83 @@ const LoginScreen = ({ onLoginSuccess }: { onLoginSuccess: () => void }) => {
       Alert.alert("Error de Autenticación", error.message);
     }
   };
+
   const onGoogleButtonPress = async () => {
-  try {
-    // 1. Iniciar sesión en Google
-    const userInfo = await GoogleSignin.signIn();
-    const idToken = userInfo.data?.idToken;
-    
-    if (!idToken) {
-      throw new Error('No se pudo obtener el token de Google');
+    try {
+      const userInfo = await GoogleSignin.signIn();
+      const idToken = userInfo.data?.idToken;
+      
+      if (!idToken) {
+        throw new Error('No se pudo obtener el token de Google');
+      }
+      
+      const googleCredential = auth.GoogleAuthProvider.credential(idToken);
+      const userCredential = await auth().signInWithCredential(googleCredential);
+      
+      // Verificar si el usuario ya existe en Firestore
+      const userDoc = await firestore().collection('users').doc(userCredential.user.uid).get();
+      
+      if (!userDoc.exists) {
+        // Si es nuevo, guardar con rol seleccionado
+        await firestore().collection('users').doc(userCredential.user.uid).set({
+          email: userCredential.user.email,
+          role: selectedRole,
+          createdAt: firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      
+      onLoginSuccess();
+    } catch (error) {
+      console.error(error);
+      Alert.alert("Error", "No se pudo iniciar sesión con Google");
     }
-    
-    // 2. Crear una credencial de Firebase con el token
-    const googleCredential = auth.GoogleAuthProvider.credential(idToken);
-    // 3. Iniciar sesión en Firebase
-    await auth().signInWithCredential(googleCredential);
-    onLoginSuccess();
-  } catch (error) {
-    console.error(error);
-    Alert.alert("Error", "No se pudo iniciar sesión con Google");
-  }
-};
+  };
 
   return (
-<View style={styles.container}>
+    <View style={styles.container}>
       <Text style={styles.title}>SafeMind AI</Text>
-      <Text style={styles.subtitle}>{isRegistering ? 'Registro de Tutor' : 'Acceso para Padres'}</Text>
+      <Text style={styles.subtitle}>
+        {isRegistering 
+          ? `Registro de ${selectedRole === 'tutor' ? 'Tutor' : 'Hijo'}` 
+          : 'Iniciar Sesión'}
+      </Text>
       
-      {/* Etiqueta para Email */}
+      {/* Selector de Rol (solo visible en registro) */}
+      {isRegistering && (
+        <View style={styles.roleSelector}>
+          <Text style={styles.roleLabel}>Selecciona tu rol:</Text>
+          <View style={styles.roleButtons}>
+            <TouchableOpacity
+              style={[styles.roleButton, selectedRole === 'tutor' && styles.roleButtonActive]}
+              onPress={() => setSelectedRole('tutor')}
+            >
+              <Text style={[styles.roleButtonText, selectedRole === 'tutor' && styles.roleButtonTextActive]}>
+                👨‍👩‍👧 Tutor
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.roleButton, selectedRole === 'child' && styles.roleButtonActive]}
+              onPress={() => setSelectedRole('child')}
+            >
+              <Text style={[styles.roleButtonText, selectedRole === 'child' && styles.roleButtonTextActive]}>
+                👶 Hijo/a
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
       <Text style={styles.label}>Correo Electrónico:</Text>
       <TextInput 
         style={styles.input} 
         placeholder="ejemplo@correo.com" 
-        placeholderTextColor="#999" // Asegura que el placeholder se vea
+        placeholderTextColor="#999"
         value={email} 
         onChangeText={setEmail}
         autoCapitalize="none"
         keyboardType="email-address"
       />
 
-      {/* Etiqueta para Contraseña */}
       <Text style={styles.label}>Contraseña:</Text>
       <TextInput 
         style={styles.input} 
@@ -78,14 +126,17 @@ const LoginScreen = ({ onLoginSuccess }: { onLoginSuccess: () => void }) => {
       />
 
       <TouchableOpacity style={styles.button} onPress={handleAuth}>
-        <Text style={styles.buttonText}>{isRegistering ? 'Crear Cuenta' : 'Iniciar Sesión'}</Text>
+        <Text style={styles.buttonText}>
+          {isRegistering ? `Crear Cuenta de ${selectedRole === 'tutor' ? 'Tutor' : 'Hijo'}` : 'Iniciar Sesión'}
+        </Text>
       </TouchableOpacity>
+
       <TouchableOpacity 
-  style={[styles.button, { backgroundColor: '#db4437', marginTop: 10 }]} 
-  onPress={onGoogleButtonPress}
->
-  <Text style={styles.buttonText}>Continuar con Google</Text>
-</TouchableOpacity>
+        style={[styles.button, { backgroundColor: '#db4437', marginTop: 10 }]} 
+        onPress={onGoogleButtonPress}
+      >
+        <Text style={styles.buttonText}>Continuar con Google</Text>
+      </TouchableOpacity>
 
       <TouchableOpacity onPress={() => setIsRegistering(!isRegistering)}>
         <Text style={styles.switchText}>
@@ -101,10 +152,51 @@ const styles = StyleSheet.create({
     flex: 1, 
     justifyContent: 'center', 
     padding: 30, 
-    backgroundColor: '#F5F7F9' // Fondo gris muy claro para que resalten los inputs
+    backgroundColor: '#F5F7F9'
   },
   title: { fontSize: 32, fontWeight: 'bold', textAlign: 'center', color: '#2c3e50', marginBottom: 5 },
-  subtitle: { fontSize: 16, textAlign: 'center', marginBottom: 30, color: '#7f8c8d' },
+  subtitle: { fontSize: 16, textAlign: 'center', marginBottom: 20, color: '#7f8c8d' },
+  roleSelector: {
+    marginBottom: 20,
+    padding: 15,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    elevation: 2,
+  },
+  roleLabel: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#34495e',
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  roleButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  roleButton: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#dcdde1',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+  },
+  roleButtonActive: {
+    borderColor: '#2ecc71',
+    backgroundColor: '#d5f4e6',
+  },
+  roleButtonText: {
+    fontSize: 14,
+    color: '#7f8c8d',
+    fontWeight: '500',
+  },
+  roleButtonTextActive: {
+    color: '#27ae60',
+    fontWeight: 'bold',
+  },
   label: {
     fontSize: 14,
     fontWeight: 'bold',
@@ -113,15 +205,15 @@ const styles = StyleSheet.create({
     marginLeft: 5
   },
   input: { 
-    backgroundColor: '#ffffff', // Fondo blanco puro para el input
+    backgroundColor: '#ffffff',
     borderWidth: 1, 
     borderColor: '#dcdde1', 
     padding: 15, 
     borderRadius: 10, 
     marginBottom: 20,
-    color: '#000000', // TEXTO SIEMPRE NEGRO AL ESCRIBIR
+    color: '#000000',
     fontSize: 16,
-    elevation: 2, // Sombra suave en Android
+    elevation: 2,
   },
   button: { 
     backgroundColor: '#2ecc71', 

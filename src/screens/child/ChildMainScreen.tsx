@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, DeviceEventEmitter, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, DeviceEventEmitter, ActivityIndicator, TouchableOpacity, Alert } from 'react-native';
 import { Camera } from 'react-native-vision-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import firestore from '@react-native-firebase/firestore';
+import auth from '@react-native-firebase/auth';
 import { analyzeRisk } from '../../AnalyzerAI';
 import { isNoiseMessage } from '../../utils/filters';
 import { requestCameraPermission, checkCameraPermission } from '../../utils/permissions';
@@ -11,22 +12,14 @@ const ChildMainScreen = () => {
   const [tutorId, setTutorId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [hasPermission, setHasPermission] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
 
-  // 1. Verificar vinculación y permisos al iniciar
+  // 1. Verificar vinculación al iniciar
   useEffect(() => {
     const initialize = async () => {
       console.log('👶 Inicializando ChildMainScreen...');
       const id = await AsyncStorage.getItem('tutorId');
       setTutorId(id);
-      
-      // Solo pide permiso si NO está vinculado (necesita escanear)
-      if (!id) {
-        console.log('👶 No vinculado, solicitando permiso de cámara...');
-        const permission = await requestCameraPermission();
-        console.log('👶 Permiso obtenido:', permission);
-        setHasPermission(permission);
-      }
-      
       setLoading(false);
     };
     initialize();
@@ -56,44 +49,148 @@ const ChildMainScreen = () => {
     }
   }, [tutorId]);
 
+  const handleStartScanning = async () => {
+    console.log('👶 Iniciando escaneo...');
+    const permission = await requestCameraPermission();
+    console.log('👶 Permiso obtenido:', permission);
+    setHasPermission(permission);
+    if (permission) {
+      setShowScanner(true);
+    }
+  };
+
+  const handleUnlink = async () => {
+    Alert.alert(
+      'Desvincular Dispositivo',
+      '¿Estás seguro que deseas desvincular este dispositivo del tutor?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Desvincular',
+          style: 'destructive',
+          onPress: async () => {
+            await AsyncStorage.removeItem('tutorId');
+            setTutorId(null);
+            setShowScanner(false);
+            setHasPermission(false);
+          },
+        },
+      ]
+    );
+  };
+
+  const handleLogout = async () => {
+    Alert.alert(
+      'Cerrar Sesión',
+      '¿Estás seguro que deseas cerrar sesión?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Cerrar Sesión',
+          style: 'destructive',
+          onPress: async () => {
+            // NO borrar tutorId - mantener vinculación
+            // await AsyncStorage.removeItem('tutorId'); // 👈 COMENTAR O ELIMINAR ESTA LÍNEA
+            await auth().signOut();
+          },
+        },
+      ]
+    );
+  };
+
   if (loading) {
     return <ActivityIndicator size="large" style={styles.center} />;
   }
 
-  // --- VISTA A: ESCÁNER (Si no hay vínculo) ---
-  if (!tutorId) {
+  // --- VISTA A: PANTALLA DE BIENVENIDA (Si no hay vínculo y no está escaneando) ---
+  if (!tutorId && !showScanner) {
+    return (
+      <View style={styles.welcomeContainer}>
+        <TouchableOpacity style={styles.menuButton} onPress={handleLogout}>
+          <Text style={styles.menuIcon}>⋮</Text>
+        </TouchableOpacity>
+
+        <View style={styles.welcomeContent}>
+          <Text style={styles.welcomeEmoji}>👶</Text>
+          <Text style={styles.welcomeTitle}>¡Bienvenido a SafeMind AI!</Text>
+          <Text style={styles.welcomeSubtitle}>
+            Para activar la protección, necesitas vincular este dispositivo con tu tutor
+          </Text>
+          
+          <View style={styles.instructionsBox}>
+            <Text style={styles.instructionsTitle}>📋 Instrucciones:</Text>
+            <Text style={styles.instructionStep}>1. Pide a tu padre/madre que abra la app</Text>
+            <Text style={styles.instructionStep}>2. Presiona "Escanear código QR"</Text>
+            <Text style={styles.instructionStep}>3. Apunta la cámara al código QR</Text>
+          </View>
+
+          <TouchableOpacity style={styles.scanButton} onPress={handleStartScanning}>
+            <Text style={styles.scanButtonText}>📷 Escanear Código QR</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // --- VISTA B: ESCÁNER (Si no hay vínculo pero inició el escaneo) ---
+  if (!tutorId && showScanner) {
     if (!hasPermission) {
       return (
         <View style={styles.center}>
           <Text style={styles.errorText}>Permiso de cámara denegado</Text>
           <Text style={styles.errorSubtext}>Ve a Configuración para habilitar el permiso</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleStartScanning}>
+            <Text style={styles.retryButtonText}>Reintentar</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.cancelButton} onPress={() => setShowScanner(false)}>
+            <Text style={styles.cancelButtonText}>Cancelar</Text>
+          </TouchableOpacity>
         </View>
       );
     }
     
-    return <QRScannerView onScanned={async (scannedId) => {
-      await AsyncStorage.setItem('tutorId', scannedId);
-      setTutorId(scannedId);
-    }} />;
+    return <QRScannerView 
+      onScanned={async (scannedId) => {
+        await AsyncStorage.setItem('tutorId', scannedId);
+        setTutorId(scannedId);
+        setShowScanner(false);
+      }}
+      onCancel={() => setShowScanner(false)}
+    />;
   }
 
-  // --- VISTA B: ESCUDO (Si ya está vinculado) ---
+  // --- VISTA C: ESCUDO (Si ya está vinculado) ---
   return (
     <View style={styles.shieldContainer}>
+      <TouchableOpacity style={styles.menuButton} onPress={handleLogout}>
+        <Text style={styles.menuIcon}>⋮</Text>
+      </TouchableOpacity>
+
       <View style={styles.iconCircle}>
         <Text style={{fontSize: 60}}>🛡️</Text>
       </View>
       <Text style={styles.shieldTitle}>SafeMind AI Activado</Text>
       <Text style={styles.shieldStatus}>Protegiendo este dispositivo en tiempo real</Text>
+      
       <View style={styles.linkedBadge}>
-        <Text style={styles.linkedText}>Vinculado con: {tutorId.substring(0, 8)}...</Text>
+        <Text style={styles.linkedText}>Vinculado con: {tutorId?.substring(0, 8)}...</Text>
+      </View>
+
+      <View style={styles.actionsContainer}>
+        <TouchableOpacity style={styles.unlinkButton} onPress={handleUnlink}>
+          <Text style={styles.unlinkButtonText}>🔗 Desvincular Dispositivo</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+          <Text style={styles.logoutButtonText}>🚪 Cerrar Sesión</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
 };
 
 // Componente separado para el escáner QR
-const QRScannerView = ({ onScanned }: { onScanned: (id: string) => void }) => {
+const QRScannerView = ({ onScanned, onCancel }: { onScanned: (id: string) => void; onCancel: () => void }) => {
   const [device, setDevice] = useState<any>(null);
   const [isActive, setIsActive] = useState(false);
 
@@ -132,6 +229,10 @@ const QRScannerView = ({ onScanned }: { onScanned: (id: string) => void }) => {
       <View style={styles.overlay}>
         <Text style={styles.scanTitle}>Vincular con Tutor</Text>
         <Text style={styles.scanSub}>Apunta al código QR en el celular de tu padre/madre</Text>
+        
+        <TouchableOpacity style={styles.cancelScanButton} onPress={onCancel}>
+          <Text style={styles.cancelScanButtonText}>✕ Cancelar</Text>
+        </TouchableOpacity>
       </View>
       <Camera
         style={StyleSheet.absoluteFill}
@@ -154,11 +255,23 @@ const QRScannerView = ({ onScanned }: { onScanned: (id: string) => void }) => {
 };
 
 const styles = StyleSheet.create({
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20, backgroundColor: '#f0f9ff' },
   container: { flex: 1, backgroundColor: 'black' },
   overlay: { position: 'absolute', top: 60, width: '100%', zIndex: 1, alignItems: 'center', padding: 20 },
   scanTitle: { color: 'white', fontSize: 22, fontWeight: 'bold' },
   scanSub: { color: 'white', textAlign: 'center', marginTop: 10 },
+  cancelScanButton: {
+    marginTop: 20,
+    backgroundColor: 'rgba(231, 76, 60, 0.9)',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+  },
+  cancelScanButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
   scannerFrame: {
     position: 'absolute',
     top: '30%',
@@ -170,12 +283,134 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: 'transparent'
   },
-  shieldContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f9ff' },
+  welcomeContainer: {
+    flex: 1,
+    backgroundColor: '#f0f9ff',
+  },
+  welcomeContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 30,
+  },
+  welcomeEmoji: {
+    fontSize: 80,
+    marginBottom: 20,
+  },
+  welcomeTitle: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    color: '#2c3e50',
+    textAlign: 'center',
+    marginBottom: 15,
+  },
+  welcomeSubtitle: {
+    fontSize: 16,
+    color: '#7f8c8d',
+    textAlign: 'center',
+    marginBottom: 30,
+    paddingHorizontal: 20,
+  },
+  instructionsBox: {
+    backgroundColor: '#fff',
+    padding: 20,
+    borderRadius: 15,
+    width: '100%',
+    marginBottom: 30,
+    elevation: 3,
+  },
+  instructionsTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#34495e',
+    marginBottom: 15,
+  },
+  instructionStep: {
+    fontSize: 14,
+    color: '#7f8c8d',
+    marginBottom: 8,
+    lineHeight: 20,
+  },
+  scanButton: {
+    backgroundColor: '#2ecc71',
+    paddingHorizontal: 30,
+    paddingVertical: 15,
+    borderRadius: 25,
+    elevation: 5,
+  },
+  scanButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  shieldContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f9ff', padding: 20 },
+  menuButton: {
+    position: 'absolute',
+    top: 20,
+    right: 20,
+    padding: 10,
+    zIndex: 10,
+  },
+  menuIcon: {
+    fontSize: 28,
+    color: '#34495e',
+    fontWeight: 'bold',
+  },
   iconCircle: { width: 120, height: 120, borderRadius: 60, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center', elevation: 10 },
   shieldTitle: { fontSize: 24, fontWeight: 'bold', color: '#2c3e50', marginTop: 30 },
-  shieldStatus: { fontSize: 16, color: '#7f8c8d', marginTop: 10 },
+  shieldStatus: { fontSize: 16, color: '#7f8c8d', marginTop: 10, textAlign: 'center' },
   linkedBadge: { marginTop: 40, padding: 10, backgroundColor: '#d1fae5', borderRadius: 20 },
   linkedText: { color: '#065f46', fontSize: 12, fontWeight: 'bold' },
+  actionsContainer: {
+    marginTop: 50,
+    width: '100%',
+    paddingHorizontal: 20,
+  },
+  unlinkButton: {
+    backgroundColor: '#ff9800',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  unlinkButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  logoutButton: {
+    backgroundColor: '#e74c3c',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  logoutButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  retryButton: {
+    backgroundColor: '#2ecc71',
+    padding: 15,
+    borderRadius: 10,
+    marginTop: 20,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  cancelButton: {
+    backgroundColor: '#95a5a6',
+    padding: 15,
+    borderRadius: 10,
+    marginTop: 10,
+  },
+  cancelButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
   errorText: { fontSize: 18, color: '#e74c3c', fontWeight: 'bold', marginBottom: 10 },
   errorSubtext: { fontSize: 14, color: '#7f8c8d', textAlign: 'center' },
 });
